@@ -4,7 +4,7 @@ import openmc
 from onix.cell import Cell
 from onix.system import System
 from onix import salameche
-from .openmc_openmc import *
+from .couple_openmc import *
 from .openmc_fix import *
 from onix.salameche import mat_builder as mb
 from onix.salameche import cram
@@ -12,7 +12,7 @@ from onix.salameche import cram
 from onix import utils
 from onix import data
 
-class Couple_msr(onix.couple.Couple_openmc):
+class Couple_msr(Couple_openmc):
     """This class is used to execute coupled-mode simulations, for circulating fuel systems
 
     Through this class, the user can:
