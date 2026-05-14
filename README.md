@@ -68,6 +68,10 @@ If you use ONIX in your research, please cite:
 
 - Julien de Troullioud de Lanversin, Moritz Kutt, and Alexander Glaser, "[ONIX: An open-source depletion code](https://doi.org/10.1016/j.anucene.2020.107903)," *Annals of Nuclear Energy* **151** (2021).
 
+If you use the molten-salt-reactor module or the multi-point MSR depletion capability, please also cite:
+
+- M. H. Elhareef and Z. Wu, "[A Novel Multi-Point Depletion Model for Molten Salt Reactors](https://doi.org/10.3390/jne7010017)," *Journal of Nuclear Engineering* **7**(1), 17 (2026).
+
 ## Contact
 
 Questions and contributions are welcome. For project inquiries, please contact Julien de Troullioud de Lanversin at `j.detroullioud@gmail.com`.
