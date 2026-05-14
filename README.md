@@ -33,7 +33,7 @@ The repository also includes notebook examples for circulating-fuel studies, inc
 - [MSFR_fixed_flux.ipynb](examples/MSFR_fixed_flux.ipynb)
 - [MSFR_fixed_power.ipynb](examples/MSFR_fixed_power.ipynb)
 - [MSFR_with_feed.ipynb](examples/MSFR_with_feed.ipynb)
-- [post_processing.ipynb](examples/output_summary/post_processing.ipynb)
+- [post_processing.ipynb](examples/post_processing.ipynb)
 
 ## Installation
 
@@ -71,6 +71,10 @@ If you use ONIX in your research, please cite:
 ## Contact
 
 Questions and contributions are welcome. For project inquiries, please contact Julien de Troullioud de Lanversin at `j.detroullioud@gmail.com`.
+
+## Acknowledgments
+
+Special thanks to [Solchan Han](https://github.com/hsc91) for originally identifying the two hidden MSR edge-case bugs and for assisting with their resolution and validation.
 
 ## License
 
