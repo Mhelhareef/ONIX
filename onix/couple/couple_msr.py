@@ -1,4 +1,5 @@
 import numpy as np
+import re
 import time
 import openmc
 from onix.cell import Cell
@@ -55,6 +56,10 @@ class Couple_msr(Couple_openmc):
     
     """
 
+    _ELEMENT_SYMBOLS = {symbol.lower(): symbol for symbol in data.nuc_name_dic}
+    _ONIX_NUCLIDE_RE = re.compile(r'^([A-Za-z]+)-(\d+)(\*|[mMnN]1?)?$')
+    _OPENMC_NUCLIDE_RE = re.compile(r'^([A-Za-z]+)(\d+)(?:_?([mMnN]1?))?$')
+
 
 
 
@@ -102,6 +107,307 @@ class Couple_msr(Couple_openmc):
             self.selected_bucells_nucl_list_dict = {key: self.loop_nucl_list for key in self.loop_dict}
         else:
             self.selected_bucells_nucl_list_dict = {}
+
+    @classmethod
+    def _normalize_element_symbol(cls, element_symbol):
+        symbol = '{}'.format(element_symbol).strip().replace(' ', '')
+        if symbol == '':
+            raise ValueError('Element name cannot be empty')
+
+        normalized_symbol = cls._ELEMENT_SYMBOLS.get(symbol.lower())
+        if normalized_symbol is None:
+            raise ValueError('Unknown element name {}'.format(element_symbol))
+
+        return normalized_symbol
+
+    @classmethod
+    def _classify_species_name(cls, species_name):
+        species = '{}'.format(species_name).strip().replace(' ', '')
+        if species == '':
+            raise ValueError('Nuclide or element name cannot be empty')
+
+        if utils.is_zamid(species):
+            return 'nuclide', utils.zamid_to_name(species)
+
+        match = cls._ONIX_NUCLIDE_RE.fullmatch(species)
+        if match is None:
+            match = cls._OPENMC_NUCLIDE_RE.fullmatch(species)
+
+        if match is not None:
+            element = cls._normalize_element_symbol(match.group(1))
+            mass_number = int(match.group(2))
+            state = '*' if match.group(3) is not None else ''
+            return 'nuclide', '{}-{}{}'.format(element, mass_number, state)
+
+        if species.lower() in cls._ELEMENT_SYMBOLS:
+            return 'element', cls._normalize_element_symbol(species)
+
+        raise ValueError('Unknown nuclide or element name {}'.format(species_name))
+
+    @classmethod
+    def _normalize_nuclide_name(cls, nuclide_name):
+        species_type, normalized_name = cls._classify_species_name(nuclide_name)
+        if species_type != 'nuclide':
+            raise ValueError('Unknown nuclide name {}'.format(nuclide_name))
+
+        return normalized_name
+
+    @classmethod
+    def _normalize_element_name(cls, element_name):
+        species_type, normalized_name = cls._classify_species_name(element_name)
+        if species_type == 'element':
+            return normalized_name
+
+        return normalized_name.split('-')[0]
+
+    def _build_bucell_lookup(self, bucell_list):
+        bucell_index_by_name = {}
+        bucell_by_name = {}
+        for index, bucell in enumerate(bucell_list):
+            bucell_index_by_name[bucell.name] = index
+            bucell_by_name[bucell.name] = bucell
+
+        loop_name_set = set(self.loop_dict.keys())
+        bucell_name_set = set(bucell_index_by_name.keys())
+        if loop_name_set != bucell_name_set:
+            missing_from_loop = bucell_name_set - loop_name_set
+            missing_from_system = loop_name_set - bucell_name_set
+            raise ValueError(
+                'loop_dict keys must match the selected BUCells. Missing from loop_dict: {}. '
+                'Missing from system.get_bucell_list(): {}.'.format(
+                    sorted(missing_from_loop),
+                    sorted(missing_from_system),
+                )
+            )
+
+        return bucell_index_by_name, bucell_by_name
+
+    def _build_passport_lookup(self, passport_list):
+        nuclide_index_by_name = {}
+        element_indices_by_name = {}
+
+        for index, passport in enumerate(passport_list):
+            nuclide_name = self._normalize_nuclide_name(passport.name)
+            nuclide_index_by_name[nuclide_name] = index
+            element_name = nuclide_name.split('-')[0]
+            if element_name not in element_indices_by_name:
+                element_indices_by_name[element_name] = []
+            element_indices_by_name[element_name].append(index)
+
+        return nuclide_index_by_name, element_indices_by_name
+
+    def _build_element_rate_vector(self, m, element_indices_by_name, element_rate_pairs):
+        values = np.zeros(m)
+
+        for element_name, rate in element_rate_pairs:
+            normalized_element = self._normalize_element_name(element_name)
+            for index in element_indices_by_name.get(normalized_element, []):
+                values[index] += rate
+
+        return values
+
+    def _build_nuclide_rate_vector(self, m, nuclide_index_by_name, nuclide_rate_pairs, scale=1.0):
+        values = np.zeros(m)
+
+        for nuclide_name, rate in nuclide_rate_pairs:
+            normalized_nuclide = self._normalize_nuclide_name(nuclide_name)
+            index = nuclide_index_by_name.get(normalized_nuclide)
+            if index is not None:
+                values[index] += scale * rate
+
+        return values
+
+    def _build_species_rate_vector(
+        self,
+        m,
+        nuclide_index_by_name,
+        element_indices_by_name,
+        species_rate_pairs,
+        scale=1.0,
+    ):
+        values = np.zeros(m)
+
+        for species_name, rate in species_rate_pairs:
+            species_type, normalized_name = self._classify_species_name(species_name)
+            if species_type == 'nuclide':
+                index = nuclide_index_by_name.get(normalized_name)
+                if index is not None:
+                    values[index] += scale * rate
+            else:
+                for index in element_indices_by_name.get(normalized_name, []):
+                    values[index] += scale * rate
+
+        return values
+
+    def _get_bucell_index(self, cell_name, bucell_index_by_name):
+        if cell_name not in bucell_index_by_name:
+            raise KeyError(
+                "Loop cell '{}' is referenced in the circulation definition but is not part "
+                'of system.get_bucell_list()'.format(cell_name)
+            )
+
+        return bucell_index_by_name[cell_name]
+
+    def _get_normalized_passport_order(self, passport_list):
+        return [self._normalize_nuclide_name(passport.name) for passport in passport_list]
+
+    @staticmethod
+    def _get_order_mismatches(source_order, destination_order):
+        mismatch_list = []
+        for local_index in range(min(len(source_order), len(destination_order))):
+            if source_order[local_index] != destination_order[local_index]:
+                mismatch_list.append(
+                    (local_index, source_order[local_index], destination_order[local_index])
+                )
+
+        return mismatch_list
+
+    def _validate_bucell_block_order(self, bucell_list, reference_order, context):
+        for bucell in bucell_list:
+            local_order = self._get_normalized_passport_order(bucell.passlist.passport_list)
+            if local_order == reference_order:
+                continue
+
+            mismatch_list = self._get_order_mismatches(reference_order, local_order)
+            mismatch_preview = []
+            for local_index, reference_name, local_name in mismatch_list[:10]:
+                mismatch_preview.append(
+                    'local {}: reference {} != cell {}'.format(
+                        local_index,
+                        reference_name,
+                        local_name,
+                    )
+                )
+            if len(reference_order) != len(local_order):
+                mismatch_preview.insert(
+                    0,
+                    'length mismatch: reference {} != cell {}'.format(
+                        len(reference_order),
+                        len(local_order),
+                    )
+                )
+            if len(mismatch_list) > 10:
+                mismatch_preview.append(
+                    '{} additional mismatches omitted'.format(len(mismatch_list) - 10)
+                )
+
+            raise ValueError(
+                'MSR {} requires every BUCell to use the same passlist order. '
+                "Cell '{}' does not match the reference cell. {}".format(
+                    context,
+                    bucell.name,
+                    '; '.join(mismatch_preview),
+                )
+            )
+
+    def _build_connectivity_matrix(self, system):
+        bucell_list = system.get_bucell_list()
+        dummy_cell = bucell_list[0]
+        passlist = dummy_cell.passlist
+
+        m = len(mb.get_initial_vect(passlist))
+        n = m * len(bucell_list)
+
+        connectivity_matrix = np.zeros((n, n))
+        fixed_source = np.zeros(n)
+        eye_m = np.eye(m)
+
+        bucell_index_by_name, bucell_by_name = self._build_bucell_lookup(bucell_list)
+        reference_order = self._get_normalized_passport_order(passlist.passport_list)
+        self._validate_bucell_block_order(
+            bucell_list,
+            reference_order,
+            'connectivity matrix construction',
+        )
+
+        for i, bucell in enumerate(bucell_list):
+            cell_name = bucell.name
+            cell_vol = bucell.vol
+            passport_list = bucell.passlist.passport_list
+            row_slice = slice(i*m, i*m + m)
+            loop_data = self.loop_dict[cell_name]
+
+            nuclide_index_by_name, element_indices_by_name = self._build_passport_lookup(passport_list)
+
+            if 'upstream_cells' in loop_data:
+                feed_cell_list = loop_data['upstream_cells']
+                sink_flow_fraction = 0
+
+                for feed_cell_name, flow_fraction in feed_cell_list:
+                    sink_flow_fraction += flow_fraction
+                    feed_rate = self.vol_flow_rate * flow_fraction / cell_vol
+                    j = self._get_bucell_index(feed_cell_name, bucell_index_by_name)
+                    col_slice = slice(j*m, j*m + m)
+                    connectivity_matrix[row_slice, col_slice] += feed_rate * eye_m
+
+                sink_rate = self.vol_flow_rate * sink_flow_fraction / cell_vol
+                connectivity_matrix[row_slice, row_slice] -= sink_rate * eye_m
+
+            if 'elements_removal' in loop_data:
+                removal_vector = self._build_element_rate_vector(
+                    m,
+                    element_indices_by_name,
+                    loop_data['elements_removal'],
+                )
+                connectivity_matrix[row_slice, row_slice] -= np.diag(removal_vector)
+
+            if 'nuclide_removal' in loop_data:
+                removal_vector = self._build_nuclide_rate_vector(
+                    m,
+                    nuclide_index_by_name,
+                    loop_data['nuclide_removal'],
+                )
+                connectivity_matrix[row_slice, row_slice] -= np.diag(removal_vector)
+
+            if 'external_nuclide_addition' in loop_data:
+                addition_vector = self._build_nuclide_rate_vector(
+                    m,
+                    nuclide_index_by_name,
+                    loop_data['external_nuclide_addition'],
+                    scale=1e-24/cell_vol,
+                )
+                fixed_source[row_slice] += addition_vector
+
+            if 'holdup' in loop_data:
+                for feed_cell_name, removed_elements in loop_data['holdup']:
+                    j = self._get_bucell_index(feed_cell_name, bucell_index_by_name)
+                    feed_cell_volume = bucell_by_name[feed_cell_name].vol
+                    removal_vector = self._build_element_rate_vector(
+                        m,
+                        element_indices_by_name,
+                        removed_elements,
+                    )
+                    col_slice = slice(j*m, j*m + m)
+                    connectivity_matrix[row_slice, col_slice] += (
+                        feed_cell_volume / cell_vol
+                    ) * np.diag(removal_vector)
+
+            if 'external_salt_stream' in loop_data:
+                flow_rate, feed_stream = loop_data['external_salt_stream']
+                connectivity_matrix[row_slice, row_slice] -= flow_rate * eye_m / cell_vol
+                density_vector = self._build_nuclide_rate_vector(
+                    m,
+                    nuclide_index_by_name,
+                    feed_stream,
+                    scale=flow_rate/cell_vol,
+                )
+                fixed_source[row_slice] += density_vector
+
+            if 'recycling' in loop_data:
+                destination_cell, extracted_nuc = loop_data['recycling']
+                j = self._get_bucell_index(destination_cell, bucell_index_by_name)
+                destination_cell_volume = bucell_by_name[destination_cell].vol
+                transfer_vector = self._build_species_rate_vector(
+                    m,
+                    nuclide_index_by_name,
+                    element_indices_by_name,
+                    extracted_nuc,
+                    scale=cell_vol/destination_cell_volume,
+                )
+                row_destination = slice(j*m, j*m + m)
+                connectivity_matrix[row_destination, row_slice] += np.diag(transfer_vector)
+
+        return connectivity_matrix, fixed_source
 
 
     def burn(self):
@@ -158,140 +464,8 @@ class Couple_msr(Couple_openmc):
         norma_mode = sequence.norma_unit
 
         bucell_list = system.get_bucell_list()
-        dummy_cell = bucell_list[0]
-        passlist = dummy_cell.passlist
+        connectivity_matrix, fixed_source = self._build_connectivity_matrix(system)
 
-        m = len(mb.get_initial_vect(passlist))
-        n = m * len(bucell_list)
-        
-        connectivity_matrix = np.zeros((n,n))
-        fixed_source = np.zeros(n)
-
-        
-        for i, bucell, in enumerate(bucell_list):
-            cell_name = bucell.name
-            cell_vol = bucell.vol
-            passlist = bucell.passlist
-            passport_list = passlist.passport_list
-            
-            if 'upstream_cells' in self.loop_dict[cell_name].keys():
-                feed_cell_list = self.loop_dict[cell_name]['upstream_cells']
-                sink_flow_fraction = 0
-                
-                for feed_cell in feed_cell_list:
-                    feed_cell_name = feed_cell[0]
-                    flow_fraction = feed_cell[1]
-                    sink_flow_fraction += flow_fraction
-                    feed_rate = self.vol_flow_rate * flow_fraction /cell_vol
-                    j = self.selected_bucells_name_list.index(feed_cell_name)
-                    connectivity_matrix[i*m:i*m+m, j*m:j*m+m] += feed_rate*np.eye(m)
-                
-
-                sink_rate = self.vol_flow_rate * sink_flow_fraction/cell_vol
-                connectivity_matrix[i*m:i*m+m, i*m:i*m+m] -= sink_rate*np.eye(m)
-
-            if 'elements_removal' in self.loop_dict[cell_name].keys():
-                removed_element = self.loop_dict[cell_name]['elements_removal']
-                indices = []
-                removal_rates = []
-                for pair in removed_element:
-                    element = pair[0]
-                    rate = pair[1]
-                    for index, nucli in enumerate(passport_list):
-                        if nucli.name[:2] == element:
-                            indices.append(index)
-                            removal_rates.append(rate) 
-                diagonal_values = [removal_rates[indices.index(k)] if k in indices else 0 for k in range(m)]
-                connectivity_matrix[i*m:i*m+m, i*m:i*m+m] -= np.diag(diagonal_values)
-                
-
-            if 'nuclide_removal' in self.loop_dict[cell_name].keys():
-                removed_nuc = self.loop_dict[cell_name]['nuclide_removal']
-                indices = []
-                removal_rates = []
-                for pair in removed_nuc:
-                    nuc = pair[0]
-                    rate = pair[1]
-                    for index, nucli in enumerate(passport_list):
-                        if nucli.name == nuc:
-                            indices.append(index)
-                            removal_rates.append(rate) 
-                diagonal_values = [removal_rates[indices.index(k)] if k in indices else 0 for k in range(m)]
-                connectivity_matrix[i*m:i*m+m, i*m:i*m+m] -= np.diag(diagonal_values)
-
-            if 'external_nuclide_addition' in self.loop_dict[cell_name].keys():
-                added_nuc = self.loop_dict[cell_name]['external_nuclide_addition']
-                indices = []
-                addition_rates = []
-                for pair in added_element:
-                    nuc = pair[0]
-                    rate = pair[1]
-                    for index, nucli in enumerate(passport_list):
-                        if nucli.name == nuc:
-                            indices.append(index)
-                            addition_rates.append(1e-24*rate/cell_vol) 
-                diagonal_values = [addition_rates[indices.index(k)] if k in indices else 0 for k in range(m)]
-                fixed_source[i*m:i*m+m] += np.array(diagonal_values)
-            
-            if 'holdup' in self.loop_dict[cell_name].keys():
-                feed_cell_list = self.loop_dict[cell_name]['holdup']
-                for feed_cell in feed_cell_list:
-                    feed_cell_name = feed_cell[0]
-                    removed_elements = feed_cell[1]
-                    j = self.selected_bucells_name_list.index(feed_cell_name)
-                    feed_cell_volume = bucell_list[j].vol
-                    indices = []
-                    removal_rates = []
-                    for pair in removed_elements:
-                        element = pair[0]
-                        rate = pair[1]
-                        for index, nucli in enumerate(passport_list):
-                            if nucli.name[:2] == element:
-                               indices.append(index)
-                               removal_rates.append(rate) 
-                    diagonal_values = [removal_rates[indices.index(k)] if k in indices else 0 for k in range(m)]
-                    connectivity_matrix[i*m:i*m+m, j*m:j*m+m] += (feed_cell_volume/cell_vol) * np.diag(diagonal_values)
-
-
-            if 'external_salt_stream' in self.loop_dict[cell_name].keys():
-                stream = self.loop_dict[cell_name]['external_salt_stream']
-                flow_rate = stream[0]
-                feed_stream = stream[1]
-                connectivity_matrix[i*m:i*m+m, i*m:i*m+m] -= flow_rate*np.eye(m)/cell_vol
-                indices = []
-                density = []
-                for pair in feed_stream:
-                    nuc = pair[0]
-                    feed_density = pair[1]
-                    for index, nucli in enumerate(passport_list):
-                        if nucli.name == nuc:
-                           indices.append(index)
-                           density.append(flow_rate*feed_density/cell_vol) 
-                diagonal_values = [density[indices.index(k)] if k in indices else 0 for k in range(m)]
-                fixed_source[i*m:i*m+m] += np.array(diagonal_values)
-
-            if 'recycling' in self.loop_dict[cell_name].keys():
-                recycling = self.loop_dict[cell_name]['recycling']
-                destination_cell = recycling[0]
-                extracted_nuc = recycling[1]
-                j = self.selected_bucells_name_list.index(destination_cell)
-                destination_cell_volume = bucell_list[j].vol
-                indices = []
-                rates = []
-                for pair in extracted_nuc:
-                    nuc = pair[0]
-                    rate = pair[1]
-                    for index, nucli in enumerate(passport_list):
-                        if nucli.name == nuc:
-                           indices.append(index)
-                           rates.append(cell_vol*rate/destination_cell_volume)
-                diagonal_values = [rates[indices.index(k)] if k in indices else 0 for k in range(m)]
-                connectivity_matrix[j*m:j*m+m, i*m:i*m+m] +=  np.diag(diagonal_values)
-        
-        np.savetxt('connectivity_matrix.csv', connectivity_matrix, delimiter=',')
-
-                
-        
         self.connectivity_matrix = connectivity_matrix
         self.fixed_source = fixed_source
         
@@ -364,6 +538,12 @@ class Couple_msr(Couple_openmc):
 
         m = len(mb.get_initial_vect(passlist))
         n = m * len(bucell_list)
+        reference_order = self._get_normalized_passport_order(passlist.passport_list)
+        self._validate_bucell_block_order(
+            bucell_list,
+            reference_order,
+            'burn step assembly',
+        )
 
         giant_B = np.zeros((n,n))
         giant_C = np.zeros((n,n))
@@ -371,15 +551,26 @@ class Couple_msr(Couple_openmc):
 
         connectivity_matrix = self.connectivity_matrix
         fixed_source = self.fixed_source
+        if connectivity_matrix.shape != (n, n):
+            raise ValueError(
+                'MSR connectivity matrix shape {} does not match the current global '
+                'state vector shape {}. A BUCell passlist likely changed after the '
+                'connectivity matrix was built.'.format(connectivity_matrix.shape, (n, n))
+            )
+        if fixed_source.shape != (n,):
+            raise ValueError(
+                'MSR fixed source shape {} does not match the current global state '
+                'vector length {}.'.format(fixed_source.shape, n)
+            )
 
         for i, bucell in enumerate(bucell_list):
             bucell._set_folder()
             passlist = bucell.passlist
             sequence = bucell.sequence
-            
+
             # microsteps_number is of length s-1
             microsteps_number = sequence.microsteps_number(s-1)
-    
+
             B = mb.get_xs_mat(passlist)
             C = mb.get_decay_mat(passlist)
             N = mb.get_initial_vect(passlist)
