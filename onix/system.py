@@ -446,9 +446,8 @@ class System(object):
         for s in range(steps_number):
             txt += '{:<13.5E}'.format(kinf_seq[s+1].s)
 
-        write_file = open(file_name, 'w')
-        write_file.write(txt)
-        write_file.close()
+        with open(file_name, 'w', encoding='utf-8') as write_file:
+            write_file.write(txt)
 
 
     def _print_summary_param(self):
@@ -462,9 +461,8 @@ class System(object):
             txt += 'BuCell {}\n'.format(bucell.name)
             txt += 'Volume [cm³] = {}\n'.format(bucell.vol)
             txt += 'IHM [g] = {}\n\n'.format(bucell.ihm)
-        write_file = open(file_name, 'w')
-        write_file.write(txt)
-        write_file.close()
+        with open(file_name, 'w', encoding='utf-8') as write_file:
+            write_file.write(txt)
 
     def _copy_cell_folders_to_step_folder(self, s):
 
