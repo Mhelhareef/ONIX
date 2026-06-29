@@ -2,6 +2,7 @@ import numpy as np
 import re
 import time
 import openmc
+import onix.compute as compute
 from onix.cell import Cell
 from onix.system import System
 from onix import salameche
@@ -415,6 +416,7 @@ class Couple_msr(Couple_openmc):
         """
 
         start_time = time.time()
+        print ('\n\n\n----  Compute backend: {}  ----\n'.format(compute.describe_compute_backend()))
 
         # If no decay libs have been set, set default libs
         if self._decay_lib_set == 'no':
@@ -623,7 +625,7 @@ class Couple_msr(Couple_openmc):
                 print ('Particular solution')
                 tt = time.time()
                 integral = cram.CRAM16(At, fixed_source) - fixed_source
-                Np= np.linalg.solve(A, integral)
+                Np = compute.solve(A, integral)
                 Np[Np < 0] = 0
                 print('Particular solution took:{} s'.format(time.time() - tt))
                 giant_N += Np

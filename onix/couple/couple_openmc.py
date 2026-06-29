@@ -11,6 +11,7 @@ from copy import deepcopy
 
 import openmc
 import openmc.mgxs as mgxs
+import onix.compute as compute
 from onix.cell import Cell
 from onix.system import System
 from onix import salameche
@@ -191,6 +192,12 @@ class Couple_openmc(object):
     def reac_rank(self):
 
         return self._reac_rank
+
+    @property
+    def compute_backend(self):
+        """Returns the active numerical backend."""
+
+        return compute.get_compute_backend()
     
     def reac_rank_on(self):
         """Calling this function will tell ONIX to produce reaction rates ranking and print them for each BUCells
@@ -200,6 +207,14 @@ class Couple_openmc(object):
         wise the function will not work.
         """
         self._reac_rank = 'on'
+
+    def set_compute_backend(self, backend='cpu', device_id=0):
+        """Sets the numerical backend used for depletion solves."""
+
+        if hasattr(self, '_system'):
+            return self.system.set_compute_backend(backend, device_id=device_id)
+
+        return compute.set_compute_backend(backend, device_id=device_id)
 
     def select_bucells(self, bucell_list):
         """Selects the cells from the OpenMC input that should be depleted.
@@ -1564,6 +1579,7 @@ class Couple_openmc(object):
         """
 
         start_time = time.time()
+        print ('\n\n\n----  Compute backend: {}  ----\n'.format(compute.describe_compute_backend()))
 
         # If no decay libs have been set, set default libs
         if self._decay_lib_set == 'no':
